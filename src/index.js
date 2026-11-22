@@ -655,7 +655,7 @@ function mainMenuKeyboard(lang, origin = "") {
 }
 
 function buildBookmarkletCode(botUsername) {
-  const cleanBot = (botUsername || DEFAULT_BOT_USERNAME).replace(/^@/, ");
+  const cleanBot = (botUsername || DEFAULT_BOT_USERNAME).replace(/^@/, "");
   return (
     `javascript:(()=>{const t=localStorage.getItem("token");` +
     `if(!t){alert("未偵測到登入 token，請先在網頁完成登入");return;}` +
