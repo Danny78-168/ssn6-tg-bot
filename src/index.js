@@ -654,19 +654,6 @@ function mainMenuKeyboard(lang, origin = "") {
   };
 }
 
-function buildBookmarkletCode(botUsername) {
-  const atChar = String.fromCharCode(64);
-  const cleanBot = (botUsername || DEFAULT_BOT_USERNAME).split(atChar).join("");
-  const base = "https://t.me/" + cleanBot;
-  return [
-    "javascript:(()=>{",
-    "const t=localStorage.getItem('token');",
-    "if(!t){alert('請先登入網站');return;}",
-    "if(t.length<=58){location.href='" + base + "?start=bind_'+encodeURIComponent(t);}",
-    "else{navigator.clipboard?.writeText(t);alert('已複製Token請回Bot貼上');location.href='" + base + "';}",
-    "})();"
-  ].join("");
-}
 
 async function sendHomePanel(env, chatId, from, messageId = null, origin = "") {
   const profile = await ensureUserProfile(from);
@@ -1383,4 +1370,18 @@ async function editOrSend(env, chatId, messageId, text, replyMarkup = null) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildBookmarkletCode(botUsername) {
+  const atChar = String.fromCharCode(64);
+  const cleanBot = (botUsername || DEFAULT_BOT_USERNAME).split(atChar).join("");
+  const base = "https://t.me/" + cleanBot;
+  return [
+    "javascript:(()=>{",
+    "const t=localStorage.getItem('token');",
+    "if(!t){alert('請先登入網站');return;}",
+    "if(t.length<=58){location.href='" + base + "?start=bind_'+encodeURIComponent(t);}",
+    "else{navigator.clipboard?.writeText(t);alert('已複製Token請回Bot貼上');location.href='" + base + "';}",
+    "})();"
+  ].join("");
 }
