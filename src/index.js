@@ -99,20 +99,20 @@ const I18N = {
     balanceLabel: "帳戶餘額",
     langLabel: "目前語言",
     langName: "中文",
-    unboundTip: "⚠️ 尚未綁定帳號（請點下方「🔐 自動登入/綁定」）",
+    unboundTip: "⚠️ 尚未綁定帳號（請點下方「🌐 網站儀表板 / 網頁登入」）",
     boundTip: "✅ 已連接 SSN6 帳號",
     btnQuery: "🔍 下單查詢",
     btnBalance: "💳 刷新餘額",
     btnTopup: "💰 充值",
     btnOrders: "📜 歷史訂單",
     btnLang: "🌐 中英切換",
-    btnLogin: "🔐 自動登入/綁定",
-    btnSite: "🌐 網站儀表板",
+    btnLogin: "🔐 綁定 Token",
+    btnSite: "🌐 網站儀表板（自動帶回 Token）",
     chooseService: "請選擇查詢服務（價格已同步帳號等級價）：",
-    needAuth: "⚠️ 尚未登入或 Token 已過期，請先點「🔐 自動登入/綁定」。",
+    needAuth: "⚠️ 尚未登入或 Token 已過期，請先點「🌐 網站儀表板」或「🔐 綁定 Token」。",
     topupText:
       "💰 *帳戶充值說明*\n\n" +
-      "1. 點下方按鈕開啟網站儀表板進入「錢包」頁面進行 USDT 充值。\n" +
+      "1. 點下方「🌐 網站儀表板」開啟 Mini App 進入錢包頁面進行 USDT 充值。\n" +
       "2. 充值前請務必核對站內公告之唯一收款地址，避免假地址。\n" +
       "3. 充值完成後點「💳 刷新餘額」即可同步最新餘額。",
     noOrders: "📜 目前尚無歷史訂單紀錄。",
@@ -126,20 +126,20 @@ const I18N = {
     balanceLabel: "Balance",
     langLabel: "Language",
     langName: "English",
-    unboundTip: "⚠️ Not connected (tap '🔐 Auto Login / Bind' below)",
+    unboundTip: "⚠️ Not connected (tap '🌐 Dashboard' or '🔐 Bind Token')",
     boundTip: "✅ Connected to SSN6",
     btnQuery: "🔍 New Query",
     btnBalance: "💳 Refresh Balance",
     btnTopup: "💰 Top-up",
     btnOrders: "📜 Order History",
     btnLang: "🌐 中文 / EN",
-    btnLogin: "🔐 Auto Login / Bind",
-    btnSite: "🌐 Dashboard",
+    btnLogin: "🔐 Bind Token",
+    btnSite: "🌐 Dashboard (Auto-Bind Token)",
     chooseService: "Select a service (prices synced to your tier):",
-    needAuth: "⚠️ Not logged in or token expired. Tap '🔐 Auto Login / Bind' first.",
+    needAuth: "⚠️ Not logged in or token expired. Open Dashboard or Bind Token first.",
     topupText:
       "💰 *Top-up Guide*\n\n" +
-      "1. Open the Dashboard below and go to Wallet for USDT top-up.\n" +
+      "1. Tap '🌐 Dashboard' below to open the Mini App Wallet for USDT top-up.\n" +
       "2. Always verify the single official address announced in-site.\n" +
       "3. Tap '💳 Refresh Balance' after deposit to sync.",
     noOrders: "📜 No order history yet.",
@@ -151,6 +151,21 @@ const I18N = {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const origin = url.origin;
+
+    // 1. Telegram Web App（Mini App）入口頁面
+    if (request.method === "GET" && url.pathname === "/webapp") {
+      const baseUrl = (env.SSN6_BASE_URL || "https://ssn6.com").replace(/\/+$/, "");
+      return new Response(renderWebAppHtml(baseUrl), {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
+    // 2. Mini App 回傳 Token 並驗證 Telegram initData 後自動綁定
+    if (request.method === "POST" && url.pathname === "/webapp/bind") {
+      return handleWebAppBind(request, env);
+    }
 
     if (request.method === "GET" && url.pathname === "/") {
       return new Response("SSN6 Telegram Bot Worker is active.", { status: 200 });
@@ -174,13 +189,205 @@ export default {
       return new Response("Bad JSON", { status: 400 });
     }
 
-    ctx.waitUntil(handleUpdate(update, env));
+    ctx.waitUntil(handleUpdate(update, env, origin));
     return new Response("OK", { status: 200 });
   },
 };
 
+// 驗證 Telegram Mini App initData 簽章，確保回傳的用戶身分不可偽造
+async function verifyTelegramInitData(initData, botToken) {
+  if (!initData || !botToken) return null;
+  const params = new URLSearchParams(initData);
+  const hash = params.get("hash");
+  if (!hash) return null;
+  params.delete("hash");
+
+  const dataCheckString = Array.from(params.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${v}`)
+    .join("\n");
+
+  const enc = new TextEncoder();
+  const secretKeyData = await crypto.subtle.importKey(
+    "raw",
+    enc.encode("WebAppData"),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const secretKey = await crypto.subtle.sign("HMAC", secretKeyData, enc.encode(botToken));
+  const hmacKey = await crypto.subtle.importKey(
+    "raw",
+    secretKey,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sigBuf = await crypto.subtle.sign("HMAC", hmacKey, enc.encode(dataCheckString));
+  const computedHash = Array.from(new Uint8Array(sigBuf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  if (computedHash !== hash) return null;
+
+  try {
+    const userRaw = params.get("user");
+    return userRaw ? JSON.parse(userRaw) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function handleWebAppBind(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ ok: false, message: "Invalid JSON" }, { status: 400 });
+  }
+
+  const tgUser = await verifyTelegramInitData(body.initData, env.TELEGRAM_BOT_TOKEN);
+  if (!tgUser || !tgUser.id) {
+    return Response.json(
+      { ok: false, message: "Telegram initData 驗證失敗，請從 Telegram 機器人按鈕開啟此頁面" },
+      { status: 401 }
+    );
+  }
+
+  const token = normalizeToken(body.token || "");
+  if (!token || token.length < 6) {
+    return Response.json({ ok: false, message: "Token 格式無效或太短" }, { status: 400 });
+  }
+
+  const userId = tgUser.id;
+  await ensureUserProfile(tgUser);
+  const auth = { token };
+  await setUserAuth(userId, auth);
+  await clearUserState(userId);
+
+  const sync = await syncAccountInfo(env, userId, auth);
+  if (sync.ok) {
+    await sendMessage(
+      env,
+      userId,
+      `✅ *已透過網頁儀表板自動綁定成功！*\n• 目前餘額：\`$${sync.balance}\`\n• 已同步等級單價，可直接點擊下方功能使用。`,
+      mainMenuKeyboard("zh", new URL(request.url).origin)
+    );
+    return Response.json({ ok: true, balance: sync.balance });
+  }
+
+  if (sync.status === 401) {
+    await clearUserAuth(userId);
+  }
+  return Response.json(
+    {
+      ok: false,
+      message: sync.errorData?.message || `SSN6 驗證失敗 (HTTP ${sync.status})`,
+    },
+    { status: 400 }
+  );
+}
+
+function renderWebAppHtml(ssn6Url) {
+  return `<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>SSN6 儀表板與自動綁定</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, -apple-system, sans-serif;
+      background: #111315; color: #e8eaed; display: flex; flex-direction: column; min-height: 100vh;
+    }
+    .bar {
+      padding: 12px 14px; background: #191c20; border-bottom: 1px solid #2a2e33;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .row { display: flex; gap: 8px; align-items: center; }
+    input {
+      flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid #353a40;
+      background: #0e1012; color: #fff; font-size: 13px;
+    }
+    button {
+      padding: 10px 14px; border-radius: 8px; border: 0; font-weight: 600;
+      font-size: 13px; cursor: pointer;
+    }
+    .btn-primary { background: #3dd68c; color: #0b1911; }
+    .btn-sub { background: #262b31; color: #e8eaed; }
+    .tip { font-size: 12px; color: #9aa0a6; line-height: 1.45; }
+    #status { font-size: 12px; color: #f5c16c; }
+    iframe { flex: 1; width: 100%; border: 0; min-height: 72vh; background: #0e1012; }
+  </style>
+</head>
+<body>
+  <div class="bar">
+    <div class="tip">
+      1. 在下方網頁完成登入（若網站阻擋內嵌框架，點右側按鈕開外部瀏覽器登入並複製 <code>token</code>）。<br/>
+      2. 將登入後的 <b>Token</b> 貼入下方並點「一鍵綁定回機器人」，完成後將自動關閉視窗。
+    </div>
+    <div class="row">
+      <input id="tokenInput" placeholder="貼上 ssn6.com 的 Token..." />
+      <button class="btn-primary" onclick="submitToken()">一鍵綁定</button>
+      <button class="btn-sub" onclick="openExternal()">外部開啟</button>
+    </div>
+    <div id="status"></div>
+  </div>
+  <iframe id="siteFrame" src="${ssn6Url}/dashboard"></iframe>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+
+    function openExternal() {
+      const target = "${ssn6Url}/dashboard";
+      if (tg?.openLink) tg.openLink(target);
+      else window.open(target, "_blank");
+    }
+
+    async function submitToken() {
+      const statusEl = document.getElementById("status");
+      const raw = document.getElementById("tokenInput").value.trim();
+      if (!raw) {
+        statusEl.textContent = "請先貼上 Token";
+        return;
+      }
+      statusEl.textContent = "正在驗證並同步餘額...";
+      try {
+        const res = await fetch("/webapp/bind", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            initData: tg?.initData || "",
+            token: raw
+          })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          statusEl.style.color = "#3dd68c";
+          statusEl.textContent = "✅ 綁定成功！餘額：$" + data.balance + "，正在返回機器人...";
+          setTimeout(() => { if (tg) tg.close(); }, 900);
+        } else {
+          statusEl.style.color = "#ff8b8b";
+          statusEl.textContent = "❌ " + (data.message || "綁定失敗");
+        }
+      } catch (e) {
+        statusEl.style.color = "#ff8b8b";
+        statusEl.textContent = "❌ 網路錯誤：" + e.message;
+      }
+    }
+  </script>
+</body>
+</html>`;
+}
+
 function cacheReq(key) {
-  return new Request(`https://cache.local/ssn6-v2/${encodeURIComponent(key)}`);
+  return new Request(`https://cache.local/ssn6-v3/${encodeURIComponent(key)}`);
 }
 
 async function putCache(key, obj, ttlSec = 86400 * 30) {
@@ -282,7 +489,9 @@ async function clearUserState(userId) {
 
 async function addOrderRecord(userId, record) {
   const list = (await getCache(`orders:${userId}`)) || [];
-  const idx = record.query_id ? list.findIndex((x) => String(x.query_id) === String(record.query_id)) : -1;
+  const idx = record.query_id
+    ? list.findIndex((x) => String(x.query_id) === String(record.query_id))
+    : -1;
   const entry = {
     ...record,
     time: new Date().toISOString().replace("T", " ").slice(0, 19),
@@ -314,7 +523,7 @@ function normalizeToken(raw) {
   return s;
 }
 
-async function ssn6Api(env, auth, method, path, body = null) {
+async function ssn6Api(env, auth, method, path, body = null, timeoutMs = 12000) {
   const baseUrl = (env.SSN6_BASE_URL || "https://ssn6.com").replace(/\/+$/, "");
   const headers = {};
 
@@ -328,20 +537,35 @@ async function ssn6Api(env, auth, method, path, body = null) {
     init.body = JSON.stringify(body);
   }
 
-  const resp = await fetch(`${baseUrl}${path}`, init);
-  let data;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  init.signal = controller.signal;
+
   try {
-    data = await resp.json();
-  } catch {
-    data = { error: true, message: await resp.text() };
+    const resp = await fetch(`${baseUrl}${path}`, init);
+    let data;
+    try {
+      data = await resp.json();
+    } catch {
+      data = { error: true, message: await resp.text() };
+    }
+    return { status: resp.status, data };
+  } catch (err) {
+    return {
+      status: 504,
+      data: {
+        error: true,
+        message: err?.name === "AbortError" ? "Request timeout" : err?.message || "Network error",
+      },
+    };
+  } finally {
+    clearTimeout(timer);
   }
-  return { status: resp.status, data };
 }
 
 async function syncAccountInfo(env, userId, auth) {
   const result = { ok: false, status: 0, balance: null, tierPrices: {}, errorData: null };
 
-  // 1. 同步餘額：GET /api/wallet/balance
   const balRes = await ssn6Api(env, auth, "GET", "/api/wallet/balance");
   result.status = balRes.status;
   if (balRes.status === 200 && !balRes.data.error && balRes.data.balance !== undefined) {
@@ -352,7 +576,6 @@ async function syncAccountInfo(env, userId, auth) {
     return result;
   }
 
-  // 2. 同步帳號等級單價：GET /api/query/services
   const svcRes = await ssn6Api(env, auth, "GET", "/api/query/services");
   if (svcRes.status === 200 && !svcRes.data.error) {
     const list = Array.isArray(svcRes.data)
@@ -405,8 +628,13 @@ async function editMessage(env, chatId, messageId, text, replyMarkup = null) {
   return tgApi(env, "editMessageText", payload);
 }
 
-function mainMenuKeyboard(lang) {
+function mainMenuKeyboard(lang, origin = "") {
   const t = I18N[lang] || I18N.zh;
+  const webAppUrl = origin ? `${origin}/webapp` : null;
+  const siteButton = webAppUrl
+    ? { text: t.btnSite, web_app: { url: webAppUrl } }
+    : { text: t.btnSite, url: "https://ssn6.com/dashboard" };
+
   return {
     inline_keyboard: [
       [
@@ -421,13 +649,13 @@ function mainMenuKeyboard(lang) {
         { text: t.btnLang, callback_data: "menu:lang" },
         { text: t.btnLogin, callback_data: "menu:login" },
       ],
-      [{ text: t.btnSite, url: "https://ssn6.com/dashboard" }],
+      [siteButton],
     ],
   };
 }
 
 function buildBookmarkletCode(botUsername) {
-  const cleanBot = (botUsername || DEFAULT_BOT_USERNAME).replace(/^@/, "");
+  const cleanBot = (botUsername || DEFAULT_BOT_USERNAME).replace(/^@/, ");
   return (
     `javascript:(()=>{const t=localStorage.getItem("token");` +
     `if(!t){alert("未偵測到登入 token，請先在網頁完成登入");return;}` +
@@ -436,7 +664,7 @@ function buildBookmarkletCode(botUsername) {
   );
 }
 
-async function sendHomePanel(env, chatId, from, messageId = null) {
+async function sendHomePanel(env, chatId, from, messageId = null, origin = "") {
   const profile = await ensureUserProfile(from);
   const lang = profile.lang || "zh";
   const t = I18N[lang] || I18N.zh;
@@ -470,7 +698,7 @@ async function sendHomePanel(env, chatId, from, messageId = null) {
   lines.push(`• ${isBound ? t.boundTip : t.unboundTip}`);
 
   const text = lines.join("\n");
-  const kb = mainMenuKeyboard(lang);
+  const kb = mainMenuKeyboard(lang, origin);
 
   if (messageId) {
     const res = await editMessage(env, chatId, messageId, text, kb);
@@ -484,12 +712,12 @@ function formatHttpError(status, data, lang = "zh") {
   if (status === 401) {
     const code = data?.code || "TOKEN_EXPIRED";
     return isEn
-      ? `🔑 *401 Unauthorized* (\`${code}\`): Token expired or invalid. Please tap '🔐 Auto Login / Bind' again.`
-      : `🔑 *401 未授權*（\`${code}\`）：Token 無效、過期或未帶入，請重新點擊「🔐 自動登入/綁定」。`;
+      ? `🔑 *401 Unauthorized* (\`${code}\`): Token expired or invalid. Re-bind via Dashboard or Token.`
+      : `🔑 *401 未授權*（\`${code}\`）：Token 無效、過期或未帶入，請重新綁定。`;
   }
   if (status === 403) {
     return isEn
-      ? `🚨 *403 Account Disabled* (\`ACCOUNT_DISABLED\`): Rate limit (200 req/60s) exceeded. Contact support to re-enable.`
+      ? `🚨 *403 Account Disabled* (\`ACCOUNT_DISABLED\`): Rate limit (200 req/60s) exceeded.`
       : `🚨 *403 帳號已停用*（\`ACCOUNT_DISABLED\`）：觸發 60 秒 200 次請求上限，帳號已停用且不會自動恢復，需聯絡後台啟用。`;
   }
   if (status === 429) {
@@ -567,9 +795,9 @@ function formatResult(data, fallbackQueryId = null, lang = "zh") {
   return lines.join("\n");
 }
 
-async function handleUpdate(update, env) {
+async function handleUpdate(update, env, origin) {
   if (update.callback_query) {
-    await handleCallback(update.callback_query, env);
+    await handleCallback(update.callback_query, env, origin);
     return;
   }
 
@@ -589,56 +817,39 @@ async function handleUpdate(update, env) {
     if (param.startsWith("bind_")) {
       const rawToken = decodeURIComponent(param.slice(5)).trim();
       if (rawToken.length >= 6) {
-        await bindTokenAndReply(env, chatId, from, rawToken, lang);
+        await bindTokenAndReply(env, chatId, from, rawToken, lang, null, origin);
         return;
       }
     }
-    await sendHomePanel(env, chatId, from);
+    await sendHomePanel(env, chatId, from, null, origin);
     return;
   }
 
   if (text === "/help" || text === "/menu") {
-    await sendHomePanel(env, chatId, from);
+    await sendHomePanel(env, chatId, from, null, origin);
     return;
   }
 
   if (text === "/cancel") {
     await clearUserState(userId);
-    await sendMessage(env, chatId, t.cancelled, mainMenuKeyboard(lang));
+    await sendMessage(env, chatId, t.cancelled, mainMenuKeyboard(lang, origin));
     return;
   }
 
   const state = await getUserState(userId);
 
-  if (state?.step === "await_login_user") {
-    await setUserState(userId, { step: "await_login_pass", username: text });
-    await sendMessage(
-      env,
-      chatId,
-      lang === "en"
-        ? `Account: \`${text}\`\nNow enter your **Password** (not stored after login, or \`/cancel\`):`
-        : `帳號：\`${text}\`\n請輸入網站 **密碼**（僅用於當下換取 Token，不會保存密碼；輸入 \`/cancel\` 可取消）：`
-    );
-    return;
-  }
-
-  if (state?.step === "await_login_pass") {
-    await handleCredentialLogin(env, chatId, from, state.username, text, lang);
-    return;
-  }
-
   if (state?.step === "await_token") {
-    await bindTokenAndReply(env, chatId, from, text, lang);
+    await bindTokenAndReply(env, chatId, from, text, lang, null, origin);
     return;
   }
 
   if (state?.step === "await_params" && state.serviceCode) {
-    await handleQuerySubmit(env, chatId, userId, state.serviceCode, text, lang);
+    await handleQuerySubmit(env, chatId, userId, state.serviceCode, text, lang, origin);
     return;
   }
 
   if (text === "/balance") {
-    await handleBalanceAction(env, chatId, userId, lang);
+    await handleBalanceAction(env, chatId, userId, lang, null, origin);
     return;
   }
 
@@ -657,63 +868,14 @@ async function handleUpdate(update, env) {
       );
       return;
     }
-    await replyQueryResult(env, chatId, userId, qid, lang);
+    await replyQueryResult(env, chatId, userId, qid, lang, origin);
     return;
   }
 
-  await sendHomePanel(env, chatId, from);
+  await sendHomePanel(env, chatId, from, null, origin);
 }
 
-async function handleCredentialLogin(env, chatId, from, siteUsername, password, lang) {
-  const userId = from.id;
-  await clearUserState(userId);
-
-  const sent = await sendMessage(
-    env,
-    chatId,
-    lang === "en" ? "🔐 Logging into ssn6.com..." : "🔐 正在自動登入 ssn6.com 並取得 Token..."
-  );
-  const msgId = sent?.result?.message_id;
-
-  const { status, data } = await ssn6Api(env, null, "POST", "/api/login", {
-    username: siteUsername,
-    password,
-    turnstile_token: null,
-    vip_token: null,
-  });
-
-  if (status === 200 && !data.error && data.token) {
-    const siteUser = data.user?.username || siteUsername;
-    await updateUserProfile(userId, { site_username: siteUser });
-    await bindTokenAndReply(env, chatId, from, data.token, lang, msgId);
-    return;
-  }
-
-  // 若後台開啟 Turnstile 人機驗證或帳密有誤，引導使用一鍵書籤自動讀取 localStorage.token
-  const bookmarklet = buildBookmarkletCode(env.BOT_USERNAME || DEFAULT_BOT_USERNAME);
-  await setUserState(userId, { step: "await_token" });
-
-  const errMsg = data?.message || `HTTP ${status}`;
-  const fallbackText =
-    lang === "en"
-      ? `⚠️ Direct login returned: \`${errMsg}\` (Cloudflare Turnstile may be active).\n\n` +
-        "Use the one-click bookmarklet after browser login to auto-bind `localStorage.token`:\n" +
-        `\`${bookmarklet}\`\n\nOr paste your Token directly below:`
-      : `⚠️ 直接帳密登入回傳：\`${errMsg}\`（站點目前開啟了 Cloudflare 人機驗證）。\n\n` +
-        "請在網頁完成登入後點擊下方一鍵書籤，系統會自動抓取 `localStorage.token` 並跳回完成綁定：\n" +
-        `\`${bookmarklet}\`\n\n或直接在此貼上你的 Token：`;
-
-  const kb = {
-    inline_keyboard: [
-      [{ text: "🌐 開啟 ssn6.com 登入", url: "https://ssn6.com" }],
-      [{ text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" }],
-    ],
-  };
-
-  await editOrSend(env, chatId, msgId, fallbackText, kb);
-}
-
-async function bindTokenAndReply(env, chatId, from, rawInput, lang, editMsgId = null) {
+async function bindTokenAndReply(env, chatId, from, rawInput, lang, editMsgId = null, origin = "") {
   const userId = from.id;
   const token = normalizeToken(rawInput);
   if (!token || token.length < 6) {
@@ -736,8 +898,8 @@ async function bindTokenAndReply(env, chatId, from, rawInput, lang, editMsgId = 
     const txt =
       lang === "en"
         ? `✅ *Auto-Bind Successful!*\n• Balance: \`$${sync.balance}\`\n• Service prices synced.`
-        : `✅ *自動登入綁定成功！*\n• 目前餘額：\`$${sync.balance}\`\n• 已同步帳號等級價與在售服務列表。`;
-    await editOrSend(env, chatId, editMsgId, txt, mainMenuKeyboard(lang));
+        : `✅ *自動綁定成功！*\n• 目前餘額：\`$${sync.balance}\`\n• 已同步帳號等級價與在售服務列表。`;
+    await editOrSend(env, chatId, editMsgId, txt, mainMenuKeyboard(lang, origin));
     return;
   }
 
@@ -749,15 +911,15 @@ async function bindTokenAndReply(env, chatId, from, rawInput, lang, editMsgId = 
     chatId,
     editMsgId,
     formatHttpError(sync.status, sync.errorData, lang),
-    mainMenuKeyboard(lang)
+    mainMenuKeyboard(lang, origin)
   );
 }
 
-async function handleBalanceAction(env, chatId, userId, lang, messageId = null) {
+async function handleBalanceAction(env, chatId, userId, lang, messageId = null, origin = "") {
   const t = I18N[lang] || I18N.zh;
   const auth = await getUserAuth(userId);
   if (!auth) {
-    await sendMessage(env, chatId, t.needAuth, mainMenuKeyboard(lang));
+    await sendMessage(env, chatId, t.needAuth, mainMenuKeyboard(lang, origin));
     return;
   }
 
@@ -765,24 +927,29 @@ async function handleBalanceAction(env, chatId, userId, lang, messageId = null) 
   if (sync.ok) {
     const txt = `💳 *${t.balanceLabel}*：\`$${sync.balance}\``;
     if (messageId) {
-      const ok = await editMessage(env, chatId, messageId, txt, mainMenuKeyboard(lang));
+      const ok = await editMessage(env, chatId, messageId, txt, mainMenuKeyboard(lang, origin));
       if (ok?.ok) return;
     }
-    await sendMessage(env, chatId, txt, mainMenuKeyboard(lang));
+    await sendMessage(env, chatId, txt, mainMenuKeyboard(lang, origin));
     return;
   }
 
   if (sync.status === 401) {
     await clearUserAuth(userId);
   }
-  await sendMessage(env, chatId, formatHttpError(sync.status, sync.errorData, lang), mainMenuKeyboard(lang));
+  await sendMessage(
+    env,
+    chatId,
+    formatHttpError(sync.status, sync.errorData, lang),
+    mainMenuKeyboard(lang, origin)
+  );
 }
 
 async function sendOrdersAction(env, chatId, userId, lang, messageId = null) {
   const t = I18N[lang] || I18N.zh;
   const orders = await getOrderRecords(userId);
   if (!orders.length) {
-    await sendMessage(env, chatId, t.noOrders, mainMenuKeyboard(lang));
+    await sendMessage(env, chatId, t.noOrders);
     return;
   }
 
@@ -838,31 +1005,33 @@ async function sendServicePicker(env, chatId, userId, lang, messageId = null) {
   await sendMessage(env, chatId, t.chooseService, kb);
 }
 
-async function startAutoBindFlow(env, chatId, userId, lang, messageId = null) {
+async function startBindTokenFlow(env, chatId, userId, lang, messageId = null, origin = "") {
   await setUserState(userId, { step: "await_token" });
   const bookmarklet = buildBookmarkletCode(env.BOT_USERNAME || DEFAULT_BOT_USERNAME);
+  const webAppUrl = origin ? `${origin}/webapp` : "https://ssn6.com/dashboard";
 
   const txt =
     lang === "en"
-      ? "🔐 *Auto Login / Bind Account*\n\n" +
-        "• **Option 1 (Credential Login)**: Tap '🔑 Username & Password' below.\n" +
-        "• **Option 2 (One-Click Bookmarklet)**: Log in at `ssn6.com`, then run this bookmarklet to auto-bind `localStorage.token`:\n" +
+      ? "🔐 *Bind Token*\n\n" +
+        "• **Method 1 (Mini App)**: Tap '🌐 Open Mini App' below, log in and paste your Token.\n" +
+        "• **Method 2 (Bookmarklet)**: Run in browser after login to auto-read `localStorage.token`:\n" +
         `\`${bookmarklet}\`\n\n` +
-        "• **Option 3 (Direct Paste)**: Paste your Token right now:"
-      : "🔐 *自動登入 / 綁定帳號*\n\n" +
-        "• **方式一（帳密自動登入）**：點擊下方「🔑 帳密自動登入」輸入網站帳密。\n" +
-        "• **方式二（網頁一鍵書籤）**：登入 `ssn6.com` 後點擊下方書籤，自動抓 `localStorage.token` 跳回綁定：\n" +
+        "• **Method 3 (Direct Paste)**: Paste your Token right here:"
+      : "🔐 *綁定帳號 Token*\n\n" +
+        "• **方式一（Mini App 視窗）**：點下方「🌐 開啟 Mini App」登入並帶回 Token。\n" +
+        "• **方式二（瀏覽器一鍵書籤）**：登入 `ssn6.com` 後點書籤自動抓 `localStorage.token` 跳回綁定：\n" +
         `\`${bookmarklet}\`\n\n` +
-        "• **方式三（直接貼上）**：直接在此貼上 Token 即可自動綁定：";
+        "• **方式三（直接貼上）**：直接在此貼上你的 Token：";
 
   const kb = {
     inline_keyboard: [
       [
-        {
-          text: lang === "en" ? "🔑 Username & Password" : "🔑 帳密自動登入",
-          callback_data: "auth:cred",
-        },
-        { text: "🌐 ssn6.com", url: "https://ssn6.com" },
+        origin
+          ? {
+              text: lang === "en" ? "🌐 Open Mini App" : "🌐 開啟 Mini App",
+              web_app: { url: webAppUrl },
+            }
+          : { text: "🌐 ssn6.com", url: "https://ssn6.com" },
       ],
       [{ text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" }],
     ],
@@ -875,7 +1044,7 @@ async function startAutoBindFlow(env, chatId, userId, lang, messageId = null) {
   await sendMessage(env, chatId, txt, kb);
 }
 
-async function handleCallback(cb, env) {
+async function handleCallback(cb, env, origin) {
   const chatId = cb.message?.chat?.id;
   const messageId = cb.message?.message_id;
   const from = cb.from;
@@ -890,21 +1059,26 @@ async function handleCallback(cb, env) {
   const t = I18N[lang] || I18N.zh;
 
   if (data === "menu:home") {
-    await sendHomePanel(env, chatId, from, messageId);
+    await sendHomePanel(env, chatId, from, messageId, origin);
     return;
   }
 
   if (data === "menu:lang") {
     lang = lang === "zh" ? "en" : "zh";
     await updateUserProfile(userId, { lang });
-    await sendHomePanel(env, chatId, from, messageId);
+    await sendHomePanel(env, chatId, from, messageId, origin);
     return;
   }
 
   if (data === "menu:topup") {
+    const webAppUrl = origin ? `${origin}/webapp` : "https://ssn6.com/dashboard";
     const kb = {
       inline_keyboard: [
-        [{ text: t.btnSite, url: "https://ssn6.com/dashboard" }],
+        [
+          origin
+            ? { text: t.btnSite, web_app: { url: webAppUrl } }
+            : { text: t.btnSite, url: "https://ssn6.com/dashboard" },
+        ],
         [
           { text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" },
         ],
@@ -920,7 +1094,7 @@ async function handleCallback(cb, env) {
   }
 
   if (data === "menu:balance") {
-    await handleBalanceAction(env, chatId, userId, lang, messageId);
+    await handleBalanceAction(env, chatId, userId, lang, messageId, origin);
     return;
   }
 
@@ -930,21 +1104,7 @@ async function handleCallback(cb, env) {
   }
 
   if (data === "menu:login") {
-    await startAutoBindFlow(env, chatId, userId, lang, messageId);
-    return;
-  }
-
-  if (data === "auth:cred") {
-    await setUserState(userId, { step: "await_login_user" });
-    const tip =
-      lang === "en"
-        ? "Enter your `ssn6.com` **Username** (or `/cancel`):"
-        : "請輸入你的 `ssn6.com` **用戶名**（輸入 `/cancel` 可取消）：";
-    if (messageId) {
-      const ok = await editMessage(env, chatId, messageId, tip);
-      if (ok?.ok) return;
-    }
-    await sendMessage(env, chatId, tip);
+    await startBindTokenFlow(env, chatId, userId, lang, messageId, origin);
     return;
   }
 
@@ -955,7 +1115,7 @@ async function handleCallback(cb, env) {
 
     const auth = await getUserAuth(userId);
     if (!auth) {
-      await sendMessage(env, chatId, t.needAuth, mainMenuKeyboard(lang));
+      await sendMessage(env, chatId, t.needAuth, mainMenuKeyboard(lang, origin));
       return;
     }
 
@@ -981,16 +1141,16 @@ async function handleCallback(cb, env) {
   if (data.startsWith("res:")) {
     const qid = data.slice(4);
     if (!/^\d+$/.test(qid)) return;
-    await replyQueryResult(env, chatId, userId, qid, lang);
+    await replyQueryResult(env, chatId, userId, qid, lang, origin);
   }
 }
 
-async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
+async function handleQuerySubmit(env, chatId, userId, code, rawText, lang, origin) {
   const t = I18N[lang] || I18N.zh;
   const auth = await getUserAuth(userId);
   if (!auth) {
     await clearUserState(userId);
-    await sendMessage(env, chatId, t.needAuth, mainMenuKeyboard(lang));
+    await sendMessage(env, chatId, t.needAuth, mainMenuKeyboard(lang, origin));
     return;
   }
 
@@ -1033,7 +1193,13 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
 
   if (status === 401) {
     await clearUserAuth(userId);
-    await editOrSend(env, chatId, msgId, formatHttpError(401, data, lang), mainMenuKeyboard(lang));
+    await editOrSend(
+      env,
+      chatId,
+      msgId,
+      formatHttpError(401, data, lang),
+      mainMenuKeyboard(lang, origin)
+    );
     return;
   }
 
@@ -1053,13 +1219,19 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
             [{ text: lang === "en" ? "⬅️ Menu" : "⬅️ 返回主選單", callback_data: "menu:home" }],
           ],
         }
-      : mainMenuKeyboard(lang);
+      : mainMenuKeyboard(lang, origin);
     await editOrSend(env, chatId, msgId, formatHttpError(429, data, lang), kb);
     return;
   }
 
   if (status !== 200 || data.error) {
-    await editOrSend(env, chatId, msgId, formatHttpError(status, data, lang), mainMenuKeyboard(lang));
+    await editOrSend(
+      env,
+      chatId,
+      msgId,
+      formatHttpError(status, data, lang),
+      mainMenuKeyboard(lang, origin)
+    );
     return;
   }
 
@@ -1077,7 +1249,7 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
       chatId,
       msgId,
       formatResult(data, data.query_id, lang),
-      mainMenuKeyboard(lang)
+      mainMenuKeyboard(lang, origin)
     );
     return;
   }
@@ -1104,7 +1276,7 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
         chatId,
         msgId,
         formatResult(polled.data, qid, lang),
-        mainMenuKeyboard(lang)
+        mainMenuKeyboard(lang, origin)
       );
       return;
     }
@@ -1130,18 +1302,23 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
   );
 }
 
-async function replyQueryResult(env, chatId, userId, qid, lang) {
+async function replyQueryResult(env, chatId, userId, qid, lang, origin) {
   const t = I18N[lang] || I18N.zh;
   const auth = await getUserAuth(userId);
   if (!auth) {
-    await sendMessage(env, chatId, t.needAuth, mainMenuKeyboard(lang));
+    await sendMessage(env, chatId, t.needAuth, mainMenuKeyboard(lang, origin));
     return;
   }
 
   const { status, data } = await ssn6Api(env, auth, "GET", `/api/query/result/${qid}`);
   if (status === 401) {
     await clearUserAuth(userId);
-    await sendMessage(env, chatId, formatHttpError(401, data, lang), mainMenuKeyboard(lang));
+    await sendMessage(
+      env,
+      chatId,
+      formatHttpError(401, data, lang),
+      mainMenuKeyboard(lang, origin)
+    );
     return;
   }
   if (status === 404) {
@@ -1149,12 +1326,17 @@ async function replyQueryResult(env, chatId, userId, qid, lang) {
       env,
       chatId,
       lang === "en" ? `⚠️ Query record not found: \`${qid}\`` : `⚠️ 找不到查詢紀錄（404）：\`${qid}\``,
-      mainMenuKeyboard(lang)
+      mainMenuKeyboard(lang, origin)
     );
     return;
   }
   if (status !== 200 || data.error) {
-    await sendMessage(env, chatId, formatHttpError(status, data, lang), mainMenuKeyboard(lang));
+    await sendMessage(
+      env,
+      chatId,
+      formatHttpError(status, data, lang),
+      mainMenuKeyboard(lang, origin)
+    );
     return;
   }
 
@@ -1182,7 +1364,7 @@ async function replyQueryResult(env, chatId, userId, qid, lang) {
             ],
           ],
         }
-      : mainMenuKeyboard(lang);
+      : mainMenuKeyboard(lang, origin);
 
   await sendMessage(env, chatId, formatResult(data, qid, lang), kb);
 }
@@ -1197,4 +1379,4 @@ async function editOrSend(env, chatId, messageId, text, replyMarkup = null) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-    }
+}
