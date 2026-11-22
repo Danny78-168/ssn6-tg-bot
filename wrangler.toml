@@ -1,0 +1,7 @@
+name = "ssn6-tg-bot"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+SSN6_BASE_URL = "https://ssn6.com"
+ALLOWED_USER_IDS = ""
