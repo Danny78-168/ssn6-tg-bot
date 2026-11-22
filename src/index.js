@@ -1,3 +1,5 @@
+const BOT_USERNAME = "你的Bot帳號"; // 填寫 Telegram Bot 帳號（不含 @），也可在 Cloudflare 變數設定 BOT_USERNAME
+
 const SERVICES = {
   REV_PHONE_4: {
     name: { zh: "Phone 4（背調所有機主）", en: "Phone 4 (Reverse Phone)" },
@@ -96,17 +98,17 @@ const I18N = {
     balanceLabel: "帳戶餘額",
     langLabel: "目前語言",
     langName: "中文",
-    unboundTip: "尚未綁定憑證（可點「綁定憑證」貼上 Token 或 Cookie）",
-    boundTip: "已綁定憑證",
+    unboundTip: "尚未綁定 Token（可點「⚡ 一鍵綁定」或直接貼上 Token）",
+    boundTip: "已綁定 Token",
     btnQuery: "🔍 下單查詢",
     btnBalance: "💳 餘額",
     btnLang: "🌐 中英切換",
     btnTopup: "💰 充值",
     btnOrders: "📜 歷史訂單",
-    btnLogin: "🔐 綁定憑證",
+    btnLogin: "⚡ 一鍵綁定",
     btnSite: "🌐 網站儀表板",
     chooseService: "請選擇要查詢的服務：",
-    needAuth: "⚠️ 請先點「🔐 綁定憑證」設定你的 Token 或 Cookie，再進行查詢。",
+    needAuth: "⚠️ 請先完成 Token 綁定，再進行查詢。",
     topupText:
       "💰 *帳戶充值說明*\n\n" +
       "1. 請前往網站儀表板或錢包頁面查看最新充值方式與 USDT 公告。\n" +
@@ -122,17 +124,17 @@ const I18N = {
     balanceLabel: "Balance",
     langLabel: "Language",
     langName: "English",
-    unboundTip: "No credential bound (tap 'Bind Token/Cookie' to connect)",
-    boundTip: "Credential bound",
+    unboundTip: "Token not bound (tap '⚡ Auto Bind' or paste Token)",
+    boundTip: "Token bound",
     btnQuery: "🔍 New Query",
     btnBalance: "💳 Balance",
     btnLang: "🌐 中文 / EN",
     btnTopup: "💰 Top-up",
     btnOrders: "📜 Order History",
-    btnLogin: "🔐 Bind Token/Cookie",
+    btnLogin: "⚡ Auto Bind",
     btnSite: "🌐 Dashboard",
     chooseService: "Select a query service:",
-    needAuth: "⚠️ Please tap '🔐 Bind Token/Cookie' first before querying.",
+    needAuth: "⚠️ Please bind your Token first before querying.",
     topupText:
       "💰 *Top-up Guide*\n\n" +
       "1. Visit the web dashboard/wallet page to check deposit methods and USDT notices.\n" +
@@ -214,12 +216,10 @@ function getDisplayName(from) {
 
 async function ensureUserProfile(from) {
   const userId = from?.id;
-  if (!userId) return { username: "User", lang: "zh", balance: null, isNew: false };
+  if (!userId) return { username: "User", lang: "zh", balance: null };
 
   let profile = await getCache(`profile:${userId}`);
-  let isNew = false;
   if (!profile) {
-    isNew = true;
     profile = {
       user_id: userId,
       username: getDisplayName(from),
@@ -235,7 +235,7 @@ async function ensureUserProfile(from) {
       await putCache(`profile:${userId}`, profile);
     }
   }
-  return { ...profile, isNew };
+  return profile;
 }
 
 async function updateUserProfile(userId, patch) {
@@ -256,10 +256,6 @@ async function getUserAuth(userId) {
 
 async function setUserAuth(userId, authObj) {
   return putCache(`auth:${userId}`, authObj);
-}
-
-async function clearUserAuth(userId) {
-  return delCache(`auth:${userId}`);
 }
 
 async function setUserState(userId, stateObj) {
@@ -285,6 +281,21 @@ async function addOrderRecord(userId, record) {
 
 async function getOrderRecords(userId) {
   return (await getCache(`orders:${userId}`)) || [];
+}
+
+function normalizeToken(raw) {
+  const s = (raw || "").trim();
+  const bearer = s.match(/Bearer\s+([A-Za-z0-9._\-~+/=]+)/i);
+  if (bearer) return bearer[1];
+  try {
+    const parsed = JSON.parse(s);
+    if (parsed && typeof parsed === "object") {
+      return parsed.token || parsed.token_enc || s;
+    }
+  } catch {
+    // 非 JSON 純文字
+  }
+  return s;
 }
 
 async function ssn6Api(env, auth, method, path, body = null) {
@@ -363,13 +374,24 @@ function mainMenuKeyboard(lang) {
   };
 }
 
+function buildBookmarkletCode(botUsername) {
+  const cleanBot = (botUsername || "你的Bot帳號").replace(/^@/, "");
+  return (
+    `javascript:(()=>{const t=localStorage.getItem("token");` +
+    `if(!t){alert("未偵測到登入 token，請先在網頁完成登入");return;}` +
+    `if(t.length<=58&&/^[A-Za-z0-9_-]+$/.test(t)){location.href="https://t.me/${cleanBot}?start=bind_"+encodeURIComponent(t);}` +
+    `else{navigator.clipboard?.writeText(t);alert("已複製 Token，請回 Telegram Bot 貼上完成綁定");location.href="https://t.me/${cleanBot}";}})();`
+  );
+}
+
 async function sendHomePanel(env, chatId, from, messageId = null) {
   const profile = await ensureUserProfile(from);
   const lang = profile.lang || "zh";
   const t = I18N[lang] || I18N.zh;
   const auth = await getUserAuth(from.id);
 
-  let balText = profile.balance !== null && profile.balance !== undefined ? `$${profile.balance}` : "—";
+  let balText =
+    profile.balance !== null && profile.balance !== undefined ? `$${profile.balance}` : "—";
   if (auth) {
     const { status, data } = await ssn6Api(env, auth, "GET", "/api/wallet/balance");
     if (status === 200 && !data.error && data.balance !== undefined) {
@@ -402,7 +424,11 @@ function formatResult(data, fallbackQueryId = null, lang = "zh") {
   if (qid !== undefined && qid !== null) lines.push(`*Query ID*：\`${qid}\``);
   if (data.task_id) lines.push(`*Task ID*：\`${data.task_id}\``);
   if (data.reused) {
-    lines.push(isEn ? "♻️ Reused completed result within 60s" : "♻️ 60 秒內命中已完成結果（`reused: true`）");
+    lines.push(
+      isEn
+        ? "♻️ Reused completed result within 60s"
+        : "♻️ 60 秒內命中已完成結果（`reused: true`）"
+    );
   }
 
   if (status === "completed") {
@@ -459,7 +485,20 @@ async function handleUpdate(update, env) {
   const lang = profile.lang || "zh";
   const t = I18N[lang] || I18N.zh;
 
-  if (text === "/start" || text === "/help" || text === "/menu") {
+  if (text.startsWith("/start")) {
+    const param = text.split(/\s+/)[1] || "";
+    if (param.startsWith("bind_")) {
+      const rawToken = decodeURIComponent(param.slice(5)).trim();
+      if (rawToken.length >= 6) {
+        await bindTokenAndReply(env, chatId, userId, rawToken, lang);
+        return;
+      }
+    }
+    await sendHomePanel(env, chatId, from);
+    return;
+  }
+
+  if (text === "/help" || text === "/menu") {
     await sendHomePanel(env, chatId, from);
     return;
   }
@@ -471,8 +510,8 @@ async function handleUpdate(update, env) {
   }
 
   const state = await getUserState(userId);
-  if (state?.step === "await_auth") {
-    await handleAuthInput(env, chatId, userId, state.authType, text, lang);
+  if (state?.step === "await_token") {
+    await bindTokenAndReply(env, chatId, userId, text, lang);
     return;
   }
   if (state?.step === "await_params" && state.serviceCode) {
@@ -493,7 +532,11 @@ async function handleUpdate(update, env) {
   if (text.startsWith("/result")) {
     const qid = text.split(/\s+/)[1];
     if (!qid || !/^\d+$/.test(qid)) {
-      await sendMessage(env, chatId, lang === "en" ? "Usage: `/result 100861`" : "用法：`/result 100861`");
+      await sendMessage(
+        env,
+        chatId,
+        lang === "en" ? "Usage: `/result 100861`" : "用法：`/result 100861`"
+      );
       return;
     }
     await replyQueryResult(env, chatId, userId, qid, lang);
@@ -501,6 +544,46 @@ async function handleUpdate(update, env) {
   }
 
   await sendHomePanel(env, chatId, from);
+}
+
+async function bindTokenAndReply(env, chatId, userId, rawInput, lang) {
+  const token = normalizeToken(rawInput);
+  if (!token || token.length < 6) {
+    await sendMessage(
+      env,
+      chatId,
+      lang === "en"
+        ? "⚠️ Token too short, try again or `/cancel`."
+        : "⚠️ Token 內容無效或太短，請重新輸入或 `/cancel`。"
+    );
+    return;
+  }
+
+  const auth = { type: "token", value: token };
+  await setUserAuth(userId, auth);
+  await clearUserState(userId);
+
+  const { status, data } = await ssn6Api(env, auth, "GET", "/api/wallet/balance");
+  if (status === 200 && !data.error && data.balance !== undefined) {
+    await updateUserProfile(userId, { balance: data.balance });
+    await sendMessage(
+      env,
+      chatId,
+      lang === "en"
+        ? `✅ Token bound automatically! Balance: \`$${data.balance}\``
+        : `✅ Token 已自動綁定！目前餘額：\`$${data.balance}\``,
+      mainMenuKeyboard(lang)
+    );
+  } else {
+    await sendMessage(
+      env,
+      chatId,
+      lang === "en"
+        ? `✅ Token saved, balance check returned HTTP ${status}.`
+        : `✅ Token 已儲存，查餘額回傳 HTTP ${status}。`,
+      mainMenuKeyboard(lang)
+    );
+  }
 }
 
 async function handleBalanceAction(env, chatId, userId, lang, messageId = null) {
@@ -546,10 +629,14 @@ async function sendOrdersAction(env, chatId, userId, lang, messageId = null) {
       `• \`#${item.query_id || "-"}\` | *${svcName}* | \`${item.status}\` | ${item.time}`
     );
     if (item.query_id) {
-      buttons.push([{ text: `🔄 ${item.query_id} (${svcName})`, callback_data: `res:${item.query_id}` }]);
+      buttons.push([
+        { text: `🔄 ${item.query_id} (${svcName})`, callback_data: `res:${item.query_id}` },
+      ]);
     }
   }
-  buttons.push([{ text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" }]);
+  buttons.push([
+    { text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" },
+  ]);
 
   const txt = lines.join("\n");
   const kb = { inline_keyboard: buttons };
@@ -565,7 +652,9 @@ async function sendServicePicker(env, chatId, lang, messageId = null) {
   const rows = Object.entries(SERVICES).map(([code, s]) => [
     { text: `${s.name[lang] || s.name.zh} (${s.price})`, callback_data: `svc:${code}` },
   ]);
-  rows.push([{ text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" }]);
+  rows.push([
+    { text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" },
+  ]);
   const kb = { inline_keyboard: rows };
 
   if (messageId) {
@@ -575,68 +664,32 @@ async function sendServicePicker(env, chatId, lang, messageId = null) {
   await sendMessage(env, chatId, t.chooseService, kb);
 }
 
-async function startLoginFlow(env, chatId, userId, lang, messageId = null) {
+async function startAutoBindFlow(env, chatId, userId, lang, messageId = null) {
+  await setUserState(userId, { step: "await_token" });
+  const bookmarklet = buildBookmarkletCode(env.BOT_USERNAME || BOT_USERNAME);
+
   const txt =
     lang === "en"
-      ? "Choose credential type to bind:\n• *API Token*\n• *Browser Cookie*"
-      : "請選擇要綁定的憑證類型：\n• *API Token*\n• *瀏覽器 Cookie*";
+      ? "⚡ *Auto Bind Token*\n\n" +
+        "1. Save the bookmarklet below in your browser after logging into `ssn6.com` (`token`):\n" +
+        `\`${bookmarklet}\`\n\n` +
+        "2. Or paste your Token directly here (or `/cancel`):"
+      : "⚡ *一鍵自動綁定 Token*\n\n" +
+        "1. 登入 `ssn6.com` 後，將下方書籤腳本存為瀏覽器書籤並點擊（自動讀取 `token` 並跳轉）：\n" +
+        `\`${bookmarklet}\`\n\n` +
+        "2. 或直接在此貼上你的 Token（輸入 `/cancel` 可取消）：";
+
   const kb = {
     inline_keyboard: [
-      [
-        { text: "🔑 API Token", callback_data: "authmode:token" },
-        { text: "🍪 Cookie", callback_data: "authmode:cookie" },
-      ],
       [{ text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" }],
     ],
   };
+
   if (messageId) {
     const ok = await editMessage(env, chatId, messageId, txt, kb);
     if (ok?.ok) return;
   }
   await sendMessage(env, chatId, txt, kb);
-}
-
-async function handleAuthInput(env, chatId, userId, authType, rawText, lang) {
-  const cleaned = rawText.replace(/^Bearer\s+/i, "").trim();
-  if (!cleaned || cleaned.length < 6) {
-    await sendMessage(
-      env,
-      chatId,
-      lang === "en" ? "⚠️ Invalid credential, try again or `/cancel`." : "⚠️ 憑證內容太短，請重新輸入或 `/cancel`。"
-    );
-    return;
-  }
-
-  await setUserAuth(userId, { type: authType, value: cleaned });
-  await clearUserState(userId);
-
-  const { status, data } = await ssn6Api(
-    env,
-    { type: authType, value: cleaned },
-    "GET",
-    "/api/wallet/balance"
-  );
-
-  if (status === 200 && !data.error && data.balance !== undefined) {
-    await updateUserProfile(userId, { balance: data.balance });
-    await sendMessage(
-      env,
-      chatId,
-      lang === "en"
-        ? `✅ Bound! Current balance: \`$${data.balance}\``
-        : `✅ 綁定成功！目前餘額：\`$${data.balance}\``,
-      mainMenuKeyboard(lang)
-    );
-  } else {
-    await sendMessage(
-      env,
-      chatId,
-      lang === "en"
-        ? `✅ Saved (\`${authType}\`), balance check returned HTTP ${status}.`
-        : `✅ 已儲存憑證（\`${authType}\`），查餘額回傳 HTTP ${status}。`,
-      mainMenuKeyboard(lang)
-    );
-  }
 }
 
 async function handleCallback(cb, env) {
@@ -669,7 +722,9 @@ async function handleCallback(cb, env) {
     const kb = {
       inline_keyboard: [
         [{ text: t.btnSite, url: "https://ssn6.com/dashboard" }],
-        [{ text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" }],
+        [
+          { text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" },
+        ],
       ],
     };
     await sendMessage(env, chatId, t.topupText, kb);
@@ -692,26 +747,7 @@ async function handleCallback(cb, env) {
   }
 
   if (data === "menu:login") {
-    await startLoginFlow(env, chatId, userId, lang, messageId);
-    return;
-  }
-
-  if (data.startsWith("authmode:")) {
-    const authType = data.slice(9);
-    await setUserState(userId, { step: "await_auth", authType });
-    const tip =
-      authType === "token"
-        ? lang === "en"
-          ? "Send your **API Token** (or `/cancel`):"
-          : "請貼上你的 **API Token**（或 `/cancel` 取消）："
-        : lang === "en"
-          ? "Send your **Cookie** string from ssn6.com (or `/cancel`):"
-          : "請貼上登入 `ssn6.com` 後的 **Cookie** 字串（或 `/cancel` 取消）：";
-    if (messageId) {
-      const ok = await editMessage(env, chatId, messageId, tip);
-      if (ok?.ok) return;
-    }
-    await sendMessage(env, chatId, tip);
+    await startAutoBindFlow(env, chatId, userId, lang, messageId);
     return;
   }
 
@@ -779,7 +815,11 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
     queryParams[field] = parts[idx];
   });
 
-  const sent = await sendMessage(env, chatId, lang === "en" ? "📤 Submitting..." : "📤 正在送出查詢...");
+  const sent = await sendMessage(
+    env,
+    chatId,
+    lang === "en" ? "📤 Submitting..." : "📤 正在送出查詢..."
+  );
   const msgId = sent?.result?.message_id;
 
   const { status, data } = await ssn6Api(env, auth, "POST", "/api/query/create", {
@@ -794,7 +834,11 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
   if (status === 429) {
     const qid = data.query_id;
     if (qid) {
-      await addOrderRecord(userId, { query_id: qid, service_code: code, status: "pending" });
+      await addOrderRecord(userId, {
+        query_id: qid,
+        service_code: code,
+        status: "pending",
+      });
     }
     const kb = qid
       ? { inline_keyboard: [[{ text: `🔄 ${qid}`, callback_data: `res:${qid}` }]] }
@@ -803,14 +847,21 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
       env,
       chatId,
       msgId,
-      `⚠️ 429：${data.message || "Please do not resubmit"}` + (qid ? `\nQuery ID: \`${qid}\`` : ""),
+      `⚠️ 429：${data.message || "Please do not resubmit"}` +
+        (qid ? `\nQuery ID: \`${qid}\`` : ""),
       kb
     );
     return;
   }
 
   if (status === 403) {
-    await editOrSend(env, chatId, msgId, `🚨 403：${data.message || "Account disabled"}`, mainMenuKeyboard(lang));
+    await editOrSend(
+      env,
+      chatId,
+      msgId,
+      `🚨 403：${data.message || "Account disabled"}`,
+      mainMenuKeyboard(lang)
+    );
     return;
   }
 
@@ -834,7 +885,13 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
   }
 
   if (svc.mode === "sync" || data.status === "completed" || data.status === "failed") {
-    await editOrSend(env, chatId, msgId, formatResult(data, data.query_id, lang), mainMenuKeyboard(lang));
+    await editOrSend(
+      env,
+      chatId,
+      msgId,
+      formatResult(data, data.query_id, lang),
+      mainMenuKeyboard(lang)
+    );
     return;
   }
 
@@ -855,7 +912,13 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
         service_code: code,
         status: polled.data.status,
       });
-      await editOrSend(env, chatId, msgId, formatResult(polled.data, qid, lang), mainMenuKeyboard(lang));
+      await editOrSend(
+        env,
+        chatId,
+        msgId,
+        formatResult(polled.data, qid, lang),
+        mainMenuKeyboard(lang)
+      );
       return;
     }
   }
@@ -863,7 +926,9 @@ async function handleQuerySubmit(env, chatId, userId, code, rawText, lang) {
   const kb = {
     inline_keyboard: [
       ...(qid ? [[{ text: `🔄 ${qid}`, callback_data: `res:${qid}` }]] : []),
-      [{ text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" }],
+      [
+        { text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" },
+      ],
     ],
   };
 
@@ -891,7 +956,12 @@ async function replyQueryResult(env, chatId, userId, qid, lang) {
     return;
   }
   if (status !== 200 || data.error) {
-    await sendMessage(env, chatId, `❌ HTTP ${status}：\`${data.message || JSON.stringify(data)}\``, mainMenuKeyboard(lang));
+    await sendMessage(
+      env,
+      chatId,
+      `❌ HTTP ${status}：\`${data.message || JSON.stringify(data)}\``,
+      mainMenuKeyboard(lang)
+    );
     return;
   }
 
@@ -911,7 +981,12 @@ async function replyQueryResult(env, chatId, userId, qid, lang) {
       ? {
           inline_keyboard: [
             [{ text: `🔄 ${qid}`, callback_data: `res:${qid}` }],
-            [{ text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單", callback_data: "menu:home" }],
+            [
+              {
+                text: lang === "en" ? "⬅️ Back to Menu" : "⬅️ 返回主選單",
+                callback_data: "menu:home",
+              },
+            ],
           ],
         }
       : mainMenuKeyboard(lang);
