@@ -655,13 +655,17 @@ function mainMenuKeyboard(lang, origin = "") {
 }
 
 function buildBookmarkletCode(botUsername) {
-  const cleanBot = (botUsername || DEFAULT_BOT_USERNAME).replace(/^@/, "");
-  return (
-    `javascript:(()=>{const t=localStorage.getItem("token");` +
-    `if(!t){alert("未偵測到登入 token，請先在網頁完成登入");return;}` +
-    `if(t.length<=58&&/^[A-Za-z0-9_-]+$/.test(t)){location.href="https://t.me/${cleanBot}?start=bind_"+encodeURIComponent(t);}` +
-    `else{navigator.clipboard?.writeText(t);alert("已自動複製 Token，請切回 Telegram Bot 貼上完成綁定");location.href="https://t.me/${cleanBot}";}})();`
-  );
+  const atChar = String.fromCharCode(64);
+  const cleanBot = (botUsername || DEFAULT_BOT_USERNAME).split(atChar).join("");
+  const base = "https://t.me/" + cleanBot;
+  return [
+    "javascript:(()=>{",
+    "const t=localStorage.getItem('token');",
+    "if(!t){alert('請先登入網站');return;}",
+    "if(t.length<=58){location.href='" + base + "?start=bind_'+encodeURIComponent(t);}",
+    "else{navigator.clipboard?.writeText(t);alert('已複製Token請回Bot貼上');location.href='" + base + "';}",
+    "})();"
+  ].join("");
 }
 
 async function sendHomePanel(env, chatId, from, messageId = null, origin = "") {
