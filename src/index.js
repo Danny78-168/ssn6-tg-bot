@@ -1374,7 +1374,6 @@ function sleep(ms) {
 
 function buildBookmarkletCode(botUsername) {
   const atChar = String.fromCharCode(64);
-  const cleanBot = (botUsername || DEFAULT_BOT_USERNAME).split(atChar).join("");
   const base = "https://t.me/" + cleanBot;
   return [
     "javascript:(()=>{",
